@@ -6,6 +6,9 @@ name: PIC lane timing
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - pic-timing
 
 jobs:
   lane:
