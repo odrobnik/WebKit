@@ -1,0 +1,98 @@
+name: PIC lane timing
+
+# Builds the two -pic lanes exactly the way ci.yml builds a lane (`lanes.mjs build <label> --base-image <toolchain>`),
+# but on GitHub's hosted x86-64 runners (4 vCPU, 16 GB), to measure what a self-hosted build of these lanes costs.
+# Throwaway: lives on the pic-timing branch of the fork only.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  lane:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        label:
+          - bun-webkit-linux-amd64-pic
+          - bun-webkit-linux-arm64-pic
+    steps:
+      - name: Runner facts
+        run: |
+          nproc; free -g; df -h / /mnt 2>/dev/null || df -h /
+          docker version --format '{{.Server.Version}}'
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !LayoutTests/
+            !JSTests/
+            !PerformanceTests/
+            !Websites/
+            !ManualTests/
+            !WebDriverTests/
+      - uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+      - name: Build the lane
+        id: build
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          # The lane's toolchain image is oven-sh's public one; lanes.mjs derives the owner from the repository, so
+          # compute the ref as oven-sh would. Same hash, same image ci.yml starts from.
+          IMAGE=$(GITHUB_REPOSITORY_OWNER=oven-sh node .github/scripts/lanes.mjs --json | jq -r --arg l "$LABEL" '.[] | select(.label == $l) | .image')
+          echo "toolchain image: $IMAGE"
+          docker manifest inspect "$IMAGE" >/dev/null
+          node .github/scripts/lanes.mjs build "$LABEL" --output /dev/null --dry-run
+          start=$(date +%s)
+          node .github/scripts/lanes.mjs build "$LABEL" --output "$RUNNER_TEMP/bun-webkit" --base-image "$IMAGE"
+          end=$(date +%s)
+          echo "build_seconds=$((end - start))" >> "$GITHUB_OUTPUT"
+          echo "lane build: $((end - start)) s"
+      - name: Package
+        id: package
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          echo "#define BUN_WEBKIT_VERSION \"$GITHUB_SHA\"" >> bun-webkit/include/cmakeconfig.h
+          cpu=$(case "$LABEL" in *arm64*) echo arm64;; *) echo x64;; esac)
+          echo "{ \"name\": \"$LABEL\", \"version\": \"0.0.1-$GITHUB_SHA\", \"os\": [\"linux\"], \"cpu\": [\"$cpu\"], \"repository\": \"https://github.com/$GITHUB_REPOSITORY\" }" > bun-webkit/package.json
+          rm -rf bun-webkit/lib/*.so bun-webkit/lib/*.so.*
+          du -sh bun-webkit bun-webkit/lib/*.a
+          start=$(date +%s)
+          tar -czf "$LABEL.tar.gz" bun-webkit
+          end=$(date +%s)
+          echo "tar_seconds=$((end - start))" >> "$GITHUB_OUTPUT"
+          echo "tarball=$(du -h "$LABEL.tar.gz" | cut -f1)" >> "$GITHUB_OUTPUT"
+          ls -la "$LABEL.tar.gz"; df -h /
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: ${{ runner.temp }}/${{ matrix.label }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+      - name: Summary
+        env:
+          LABEL: ${{ matrix.label }}
+          BUILD: ${{ steps.build.outputs.build_seconds }}
+          TAR: ${{ steps.package.outputs.tar_seconds }}
+          SIZE: ${{ steps.package.outputs.tarball }}
+        run: |
+          {
+            echo "## $LABEL"
+            echo "- runner: ubuntu-latest, $(nproc) vCPU, $(free -g | awk '/Mem:/{print $2}') GB"
+            echo "- lane build (toolchain image pulled, ICU + WebKit built, output exported): ${BUILD} s = $((BUILD / 60)) min $((BUILD % 60)) s"
+            echo "- tar.gz: ${SIZE} in ${TAR} s"
+          } >> "$GITHUB_STEP_SUMMARY"
