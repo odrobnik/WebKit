@@ -1,0 +1,96 @@
+name: PIC build of the pinned commit
+
+# Throwaway, fork only: builds bun-webkit-linux-{amd64,arm64}-pic from this commit (SwiftBash's pin, 88b2f7a2) with
+# the Dockerfile this commit shipped, plus -fPIC -ftls-model=initial-exec, and publishes them as release assets so
+# SwiftBash's fetcher can pull them (BUN_WEBKIT_REPO=odrobnik/WebKit BUN_WEBKIT_TAG=pic-<sha> BUN_WEBKIT_VARIANT=pic).
+
+on:
+  push:
+    branches:
+      - pic-pinned
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  lane:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: bun-webkit-linux-amd64-pic
+            runner: ubuntu-latest
+            platform: linux/amd64
+            march: "-march=haswell"
+            cpu: x64
+          - label: bun-webkit-linux-arm64-pic
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            march: "-march=armv8-a+crc -mtune=ampere1"
+            cpu: arm64
+    steps:
+      - run: nproc; free -g; df -h /
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          docker image prune -af >/dev/null 2>&1 || true
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !LayoutTests/
+            !JSTests/
+      - uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+      - name: Build
+        env:
+          LABEL: ${{ matrix.label }}
+          PLATFORM: ${{ matrix.platform }}
+          MARCH_FLAG: ${{ matrix.march }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          docker buildx build -f Dockerfile --platform "$PLATFORM" --target artifact --progress=plain \
+            --build-arg WEBKIT_RELEASE_TYPE=Release \
+            --build-arg LTO_FLAG="" \
+            --build-arg RELEASE_FLAGS="-O3 -DNDEBUG=1" \
+            --build-arg MARCH_FLAG="$MARCH_FLAG" \
+            --build-arg ENABLE_SANITIZERS="" \
+            --build-arg PIC_FLAGS="-fPIC -ftls-model=initial-exec" \
+            --output "type=local,dest=$RUNNER_TEMP/bun-webkit" .
+          end=$(date +%s)
+          echo "lane build: $((end - start)) s" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Package
+        env:
+          LABEL: ${{ matrix.label }}
+          CPU: ${{ matrix.cpu }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          echo "#define BUN_WEBKIT_VERSION \"$GITHUB_SHA\"" >> bun-webkit/include/cmakeconfig.h
+          echo "{ \"name\": \"$LABEL\", \"version\": \"0.0.1-$GITHUB_SHA\", \"os\": [\"linux\"], \"cpu\": [\"$CPU\"], \"repository\": \"https://github.com/$GITHUB_REPOSITORY\" }" > bun-webkit/package.json
+          rm -rf bun-webkit/lib/*.so bun-webkit/lib/*.so.*
+          tar -czf "$LABEL.tar.gz" bun-webkit
+          ls -la "$LABEL.tar.gz" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Publish as a release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL: ${{ matrix.label }}
+          TAG: pic-88b2f7a2159c913f7dd0d73c0e88d66138cd67ba
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "bun-webkit -pic lanes of autobuild-88b2f7a2 (SwiftBash#91)" \
+              --notes "oven-sh/WebKit autobuild-88b2f7a2159c913f7dd0d73c0e88d66138cd67ba rebuilt with -fPIC -ftls-model=initial-exec (see oven-sh/WebKit#756). Throwaway for Cocoanetics/SwiftBash#91." || true
+          for attempt in 1 2 3; do
+            gh release upload "$TAG" "$RUNNER_TEMP/$LABEL.tar.gz" --repo "$GITHUB_REPOSITORY" --clobber && exit 0
+            sleep $((attempt * 10))
+          done
+          exit 1

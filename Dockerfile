@@ -5,6 +5,8 @@ ARG LTO_FLAG="-flto=full -fwhole-program-vtables -fforce-emit-vtables "
 ARG RELEASE_FLAGS="-O3 -DNDEBUG=1"
 ARG LLVM_VERSION="21"
 ARG DEFAULT_CFLAGS="-mno-omit-leaf-frame-pointer -g -fno-omit-frame-pointer -ffunction-sections -fdata-sections -faddrsig -fno-unwind-tables -fno-asynchronous-unwind-tables -DU_STATIC_IMPLEMENTATION=1 "
+# Position-independent code for a host that links the archive into a shared object; empty for Bun's own lanes.
+ARG PIC_FLAGS=""
 ARG ENABLE_SANITIZERS=""
 
 # Use different base images for ARM64 vs x86_64
@@ -21,6 +23,7 @@ ARG LLVM_VERSION
 ARG DEFAULT_CFLAGS
 ARG TARGETARCH
 ARG ENABLE_SANITIZERS
+ARG PIC_FLAGS
 
 # Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -165,8 +168,8 @@ ENV LIBRARY_PATH="/usr/lib/gcc/x86_64-linux-gnu/13:/usr/lib/x86_64-linux-gnu"
 ENV CPLUS_INCLUDE_PATH="/usr/include/c++/13:/usr/include/x86_64-linux-gnu/c++/13"
 ENV C_INCLUDE_PATH="/usr/lib/gcc/x86_64-linux-gnu/13/include"
 
-ENV CFLAGS="${DEFAULT_CFLAGS} ${MARCH_FLAG} $CFLAGS -stdlib=libstdc++"
-ENV CXXFLAGS="${DEFAULT_CFLAGS} ${MARCH_FLAG} $CXXFLAGS -stdlib=libstdc++"
+ENV CFLAGS="${DEFAULT_CFLAGS} ${PIC_FLAGS} ${MARCH_FLAG} $CFLAGS -stdlib=libstdc++"
+ENV CXXFLAGS="${DEFAULT_CFLAGS} ${PIC_FLAGS} ${MARCH_FLAG} $CXXFLAGS -stdlib=libstdc++"
 ENV LDFLAGS="-fuse-ld=lld -L/usr/lib/gcc/x86_64-linux-gnu/13 -L/usr/lib/x86_64-linux-gnu"
 
 # Verify toolchain setup
